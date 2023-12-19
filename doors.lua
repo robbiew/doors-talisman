@@ -10,6 +10,11 @@ function connectToDatabase()
     return conn
 end
 
+-- ANSI Escape Code Function for Cursor Positioning
+function positionCursor(row, col)
+    bbs_write_string(string.format("\x1b[%d;%df", row, col))
+end
+
 function readNonBlankString(prompt, maxLength)
     local input
     repeat
@@ -106,11 +111,11 @@ function displayMainMenu()
     bbs_write_string("|03Door Manager v1.0|07\r\n")
     bbs_write_string("|11Main Menu|07\r\n")
     bbs_write_string("|08------------------------------------------------------------------------------|07\r\n")
-    bbs_write_string("[1] Servers\r\n")
-    bbs_write_string("[2] Categories\r\n")
-    bbs_write_string("[3] Games\r\n")
-    bbs_write_string("\r\n[Q] Exit\r\n")
-    bbs_write_string("\r\nEnter choice: ")
+    bbs_write_string("|02[|101|02] Servers|07\r\n")
+    bbs_write_string("|02[|102|02] Categories|07\r\n")
+    bbs_write_string("|02[|103|02] Games|07\r\n")
+    bbs_write_string("|08[|07Q|08] Exit|07\r\n")
+    bbs_write_string("\r\n|06Cmd? ")
     local choice = bbs_getchar()
     return choice
 end
@@ -120,16 +125,16 @@ end
 ----------------------------------------------------------------
 
 function manageServers()
+
     while true do
         bbs_clear_screen()
-        bbs_write_string("|03Door Manager v1.0|07\r\n")
-        bbs_write_string("|11Servers|07\r\n")
-        bbs_write_string("|08------------------------------------------------------------------------------|07\r\n")
-        bbs_write_string("1. View/Edit Servers\r\n")
-        bbs_write_string("2. Add Server\r\n")
-        bbs_write_string("3. Delete Server\r\n")  
-        bbs_write_string("\r\n[Q] Return to Main Menu\r\n")
-        bbs_write_string("\r\nEnter choice: ")
+        listServers()
+      
+        bbs_write_string("\r\n|02[|101|02] Edit|07\r\n")
+        bbs_write_string("|02[|102|02] Add|07\r\n")
+        bbs_write_string("|02[|103|02] Delete|07\r\n")
+        bbs_write_string("|08[|07Q|08] Back|07\r\n")
+        bbs_write_string("\r\n|06Cmd? ")
         local choice = bbs_getchar()
 
         if choice == '1' then
@@ -152,19 +157,18 @@ function listServers()
     local cursor = conn:execute("SELECT ServerID, Name, IP, Port, Type, Tag, IsActive FROM Servers")
     bbs_clear_screen()
     bbs_write_string("|03Door Manager v1.0|07\r\n")
-    bbs_write_string("|11Servers |07> |15Edit|07\r\n")
+    bbs_write_string("|11Servers |07> |15List|07\r\n")
     bbs_write_string("|08------------------------------------------------------------------------------|07\r\n")
-    bbs_write_string("ID Name          T IP              Port Tag Act\r\n")
-    bbs_write_string("-------------------------------------------------\r\n")
+    bbs_write_string("ID  Name         Type     Address          Port   Tag   Active\r\n")
+    bbs_write_string("--------------------------------------------------------------\r\n")
     local row = cursor:fetch({}, "a")
     while row do
-        local typeAbbrev = row.Type == "NETWORK" and "N" or "L"
-        local ip = typeAbbrev == "N" and row.IP or "---"
-        local port = typeAbbrev == "N" and row.Port or "--"
-        local tag = typeAbbrev == "N" and row.Tag or "--"
-        local isActive = row.IsActive == 1 and "Y" or "N"
-        bbs_write_string(string.format("%-3d %-12s %-1s %-15s %-4s %-3s %-3s\r\n", 
-                                      row.ServerID, row.Name:sub(1, 12), typeAbbrev, ip:sub(1, 15), port, tag, isActive))
+        local ip = row.IP or "--"
+        local port = row.Port or "--"
+        local tag = row.Tag or "--"
+        local isActive = row.IsActive == 1 and "YES" or "NO"
+        bbs_write_string(string.format("%-3d %-12s %-8s %-16s %-6s %-5s %-3s\r\n", 
+                                      row.ServerID, row.Name:sub(1, 12), row.Type, ip:sub(1, 16), port, tag, isActive))
         row = cursor:fetch(row, "a")
     end
     cursor:close()
@@ -174,7 +178,9 @@ end
 
 function addServer()
     bbs_clear_screen()
-    bbs_write_string("Add New Server\r\n")
+    bbs_write_string("|03Door Manager v1.0|07\r\n")
+    bbs_write_string("|11Servers |07> |15Add|07\r\n")
+    bbs_write_string("|08------------------------------------------------------------------------------|07\r\n")
     
     -- Server Name with validation and uniqueness check
     local name = readUniqueServerName("Enter Server Name: ", 50)
@@ -383,16 +389,11 @@ function editServer()
 
                     bbs_write_string("Editing Server ID: " .. serverID .. "\r\n")
                     bbs_write_string("Name: " .. serverInfo.Name .. "\r\n")
+                    bbs_write_string("Type: " .. serverInfo.Type .. "\r\n") -- Show the server type
 
                     if serverInfo.Type ~= "LOCAL" then
                         bbs_write_string("IP: " .. serverInfo.IP .. "\r\n")
-                    end
-
-                    if serverInfo.Type ~= "LOCAL" then
                         bbs_write_string("Port: " .. serverInfo.Port .. "\r\n")
-                    end
-
-                    if serverInfo.Type ~= "LOCAL" then
                         bbs_write_string("Tag: " .. serverInfo.Tag .. "\r\n")
                     end
 
@@ -401,20 +402,13 @@ function editServer()
                     -- Ask the user which field to edit or [Q] to Quit
                     bbs_write_string("\r\nSelect field to edit or [Q] to Quit:\r\n")
                     bbs_write_string("[1] Name\r\n")
-
+                    bbs_write_string("[2] Type\r\n") -- Option to change the server type
                     if serverInfo.Type ~= "LOCAL" then
-                        bbs_write_string("[2] IP\r\n")
+                        bbs_write_string("[3] IP\r\n")
+                        bbs_write_string("[4] Port\r\n")
+                        bbs_write_string("[5] Tag\r\n")
                     end
-
-                    if serverInfo.Type ~= "LOCAL" then
-                        bbs_write_string("[3] Port\r\n")
-                    end
-
-                    if serverInfo.Type ~= "LOCAL" then
-                        bbs_write_string("[4] Tag\r\n")
-                    end
-
-                    bbs_write_string("[5] Active\r\n")
+                    bbs_write_string("[6] Active\r\n")
                     bbs_write_string("[Q] Quit\r\n")
 
                     bbs_write_string("\r\nEnter choice: ")
@@ -426,30 +420,42 @@ function editServer()
                         bbs_write_string("\r\nEnter new Name: ")
                         local newName = readUniqueServerName("", 50, serverID)  -- Check for uniqueness
                         if newName then
-                            updateServerField(serverID, "Name", newName)
+                            updateServerField(serverID, "Name", newName, "Server name updated successfully.")
                         else
                             bbs_write_string("\r\n|12Invalid or duplicate server name.|07\r\n")
                         end
-                    elseif choice == '2' and serverInfo.Type ~= "LOCAL" then
+                    elseif choice == '2' then
+                        -- Edit Type
+                        if serverInfo.Type == "LOCAL" then
+                            -- Change from LOCAL to NETWORK and clear IP, Port, and Tag fields
+                            updateServerField(serverID, "Type", "NETWORK", "Changed to NETWORK Type successfully.")
+                            updateServerField(serverID, "IP", "", "IP cleared successfully.")
+                            updateServerField(serverID, "Port", "", "Port cleared successfully.")
+                            updateServerField(serverID, "Tag", "", "Tag cleared successfully.")
+                        else
+                            -- Change from NETWORK to LOCAL
+                            updateServerField(serverID, "Type", "LOCAL", "Changed to LOCAL Type successfully.")
+                        end
+                    elseif choice == '3' and serverInfo.Type ~= "LOCAL" then
                         -- Edit IP only if the server type is not "LOCAL"
                         bbs_write_string("\r\nEnter new IP: ")
                         local newIP = readValidInput("", isValidIP, 15)
-                        updateServerField(serverID, "IP", newIP)
-                    elseif choice == '3' and serverInfo.Type ~= "LOCAL" then
+                        updateServerField(serverID, "IP", newIP, "IP updated successfully.")
+                    elseif choice == '4' and serverInfo.Type ~= "LOCAL" then
                         -- Edit Port only if the server type is not "LOCAL"
                         bbs_write_string("\r\nEnter new Port: ")
                         local newPort = readValidInput("", isValidPort, 5)
-                        updateServerField(serverID, "Port", newPort)
-                    elseif choice == '4' and serverInfo.Type ~= "LOCAL" then
+                        updateServerField(serverID, "Port", newPort, "Port updated successfully.")
+                    elseif choice == '5' and serverInfo.Type ~= "LOCAL" then
                         -- Edit Tag only if the server type is not "LOCAL"
                         bbs_write_string("\r\nEnter new Tag (up to 3 characters): ")
                         local newTag = readValidInput("", isValidTag, 3)
-                        updateServerField(serverID, "Tag", newTag)
-                    elseif choice == '5' then
+                        updateServerField(serverID, "Tag", newTag, "Tag updated successfully.")
+                    elseif choice == '6' then
                         -- Edit Active
                         bbs_write_string("\r\nSet Active [Y]es / [N]o: ")
                         local newActive = (bbs_getchar():upper() == 'Y') and 1 or 0
-                        updateServerField(serverID, "IsActive", newActive)
+                        updateServerField(serverID, "IsActive", newActive, "Status updated successfully.")
                     elseif choice:upper() == 'Q' then
                         -- Quit editing this server
                         break
@@ -466,13 +472,17 @@ function editServer()
 end
 
 
-function updateServerField(serverID, field, value)
+function updateServerField(serverID, field, value, successMessage)
     local conn = connectToDatabase()
     local sql = string.format("UPDATE Servers SET %s = '%s' WHERE ServerID = %d", field, value, serverID)
     local res, err = conn:execute(sql)
 
     if res then
-        bbs_write_string("\r\n|10Server updated successfully.|07\r\n")
+        if successMessage then
+            bbs_write_string("\r\n|10" .. successMessage .. "|07\r\n")
+        else
+            bbs_write_string("\r\n|10Server updated successfully.|07\r\n")
+        end
         bbs_pause()
     else
         bbs_write_string("\r\n|12Failed to update server: " .. err .. "|07\r\n")
@@ -491,21 +501,19 @@ function manageCategories()
         bbs_clear_screen()
         bbs_write_string("|11Category Management|07\r\n")
         bbs_write_string("|08------------------------------------------------------------------------------|07\r\n")
-        bbs_write_string("1. List Categories\r\n")
-        bbs_write_string("2. Add New Category\r\n")
-        bbs_write_string("3. Edit Category\r\n")  
-        bbs_write_string("4. Delete Category\r\n")  
-        bbs_write_string("\r\n[Q] Return to Main Menu\r\n")
-        bbs_write_string("\r\nEnter choice: ")
+        listCategories()
+        bbs_write_string("\r\n|02[|101|02] Edit|07\r\n")
+        bbs_write_string("|02[|102|02] Add|07\r\n")
+        bbs_write_string("|02[|103|02] Delete|07\r\n")
+        bbs_write_string("|08[|07Q|08] Back|07\r\n")
+        bbs_write_string("\r\n|06Cmd? ")
         local choice = bbs_getchar()
 
         if choice == '1' then
-            listCategories()  
+            editCategory()
         elseif choice == '2' then
-            addCategory()
+            addCategory()  
         elseif choice == '3' then
-            editCategory()  
-        elseif choice == '4' then
             deleteCategory()  
         elseif choice:lower() == 'q' then
             break
@@ -574,7 +582,7 @@ function deleteCategory()
     end
 
     -- Check if the category is used in any Games before deleting
-    local sqlCheck = string.format("SELECT COUNT(*) AS GameCount FROM Games WHERE CategoryID = %d", categoryId)
+    local sqlCheck = string.format("SELECT COUNT(*) AS GameCount FROM GameInstances WHERE CategoryID = %d", categoryId)
     local cursor, err = conn:execute(sqlCheck)
 
     if not cursor then
@@ -615,6 +623,11 @@ function deleteCategory()
     bbs_pause()
 end
 
+-- ANSI Escape Code Function for Cursor Positioning
+function positionCursor(row, col)
+    bbs_write_string(string.format("\x1b[%d;%df", row, col))
+end
+
 function listCategories()
     local conn = connectToDatabase()
     if not conn then
@@ -633,20 +646,49 @@ function listCategories()
     end
 
     bbs_clear_screen()
-    bbs_write_string("List of Categories:\r\n")
-    bbs_write_string("ID\tName\t\tIsAdult\r\n")
-    bbs_write_string("-----------------------------------------\r\n")
+    bbs_write_string("|03Door Manager v1.0|07\r\n")
+    bbs_write_string("|11Categories |07> |15List|07\r\n")
+    bbs_write_string("|08------------------------------------------------------------------------------|07\r\n")
+    
+    local categories = {}
+    local maxRowsPerColumn = 13  -- Set the maximum rows per column
 
     local row = cursor:fetch({}, "a")
     while row do
         local isAdultText = row.IsAdult == 1 and "Yes" or "No"
-        bbs_write_string(string.format("%-3d\t%-15s\t%-5s\r\n", row.CategoryID, row.Name, isAdultText))
+        local name = string.sub(row.Name, 1, 15) -- Limit name to 15 characters
+        table.insert(categories, string.format("%-3d %-26s %-5s\r\n", row.CategoryID, name, isAdultText))
         row = cursor:fetch(row, "a")
     end
 
     cursor:close()
     conn:close()
-    bbs_pause()
+
+    local numCategories = #categories
+    local numColumns = 2
+    local numRows = math.ceil(numCategories / numColumns)
+    
+    -- Print headers
+    positionCursor(4, 1)
+    bbs_write_string("ID  Name                       Adult    ID  Name                        Adult\r\n")
+    bbs_write_string("------------------------------------    -------------------------------------\r\n")
+
+    -- Print categories in two columns with a maximum number of rows per column
+    local rowOffset = 5
+    local colSpacing = 42
+
+    for i = 1, numRows do
+        for j = 1, numColumns do
+            local index = (i - 1) * numColumns + j
+            if index <= numCategories then
+                positionCursor(i + rowOffset, (j - 1) * colSpacing + 1)
+                bbs_write_string(categories[index])
+            end
+        end
+        if i == maxRowsPerColumn then
+            break  -- Stop printing after reaching the maximum rows per column
+        end
+    end
 end
 
 function editCategory()
@@ -696,7 +738,7 @@ function editCategory()
     -- Ask the user which field to edit
     bbs_write_string("\r\nSelect field to edit:\r\n")
     bbs_write_string("[1] Name\r\n")
-    bbs_write_string("[2] IsAdult\r\n")
+    bbs_write_string("[2] Mature\r\n")
     bbs_write_string("[3] Cancel\r\n")
     bbs_write_string("\r\nEnter choice: ")
 
