@@ -1,11 +1,23 @@
 -- Import necessary libraries
 -- luarocks install luasql-sqlite3
+
 local sqlite3 = require("luasql.sqlite3")
+local title = "Door Manager"
+local version = "1.0"   
+local seedData = true -- if you want to use csv seed data files, set this to true
+
+-- Common variables for all data lists
+local currentListType = "" 
+local selectedID = nil
+local scrollStartRow = 7  -- Adjust the starting row of the scroll area as needed
+local maxRows = bbs_get_term_height() - scrollStartRow - 3
+local selectedIndex = 1
+local offset = 0
 
 -- Function to connect to the database
 function connectToDatabase()
     local env = sqlite3.sqlite3()
-    local path = bbs_get_data_path() .. "/doors.db"
+    local path = bbs_get_data_path() .. "/gm_data.db"
     local conn = env:connect(path)
     return conn
 end
@@ -13,6 +25,19 @@ end
 -- ANSI Escape Code Function for Cursor Positioning
 function positionCursor(row, col)
     bbs_write_string(string.format("\x1b[%d;%df", row, col))
+end
+
+function menuHeader(name)
+    bbs_clear_screen()
+    bbs_write_string("|03" .. title .. " v" .. version .. "|07\r\n")
+    bbs_write_string("|11" .. name .. "|07\r\n")
+    bbs_write_string("|08------------------------------------------------------------------------------|07\r\n")
+end
+
+function menuFooter()  
+    positionCursor(bbs_get_term_height() - 2, 1)
+    bbs_write_string("|08------------------------------------------------------------------------------|07\r\n")
+    bbs_write_string(" |11[|15Q|11] Quit|07  |11[|15I|11] Insert New|07")
 end
 
 function readNonBlankString(prompt, maxLength)
@@ -64,7 +89,6 @@ function readUniqueServerName(prompt, maxLength)
     return name
 end
 
-
 function readYesNo(prompt)
     local input
     repeat
@@ -91,7 +115,6 @@ end
 
 function isValidIP(ip)
     -- Simple pattern matching to validate IP address
-    -- This can be made more sophisticated based on your requirements
     return ip:match("^%d+%.%d+%.%d+%.%d+$") ~= nil
 end
 
@@ -106,79 +129,269 @@ function isValidTag(tag)
     return tag ~= "" and not tag:match("^%s*$")
 end
 
-function displayMainMenu()
+----------------------------------------------------------------
+--  Data Views - Common to All
+----------------------------------------------------------------
+
+function listItems(query, header, itemName, tableName, columnName, addItemFunction, editFunction, deleteFunction, listType)
+    local conn = connectToDatabase()
+    if not conn then
+        bbs_write_string("Failed to connect to the database.\r\n")
+        return
+    end
+
+    local selectedIndex = 1
+    local itemList = {}
+    local itemMapping = {} -- Mapping table to map sorted indexes to original item IDs
+
+    local cursor, err = conn:execute(query)
+
+    if not cursor then
+        bbs_write_string("Failed to fetch " .. itemName .. ": " .. err .. "\r\n")
+        conn:close()
+        return
+    end
+
+    local originalIndex = 1
+
+    local row = cursor:fetch({}, "a")
+    while row do
+        local itemText = string.sub(row[itemName], 1, 45)
+        local itemID = row[columnName]
+        
+        -- Insert the item into itemList
+        table.insert(itemList, { ID = itemID, Text = itemText })
+
+        -- Map the sorted index to the original item ID
+        itemMapping[originalIndex] = itemID
+
+        row = cursor:fetch(row, "a")
+        originalIndex = originalIndex + 1
+    end
+
+    cursor:close()
+    conn:close()
+
+    local numItems = #itemList
+    local reloadMenu = false
+
     bbs_clear_screen()
-    bbs_write_string("|03Door Manager v1.0|07\r\n")
-    bbs_write_string("|11Main Menu|07\r\n")
+    menuHeader(header)
+
+    bbs_write_string(string.format("... |08Total items: %d|07\r\n", numItems))
+    bbs_write_string("... Use Arrow Keys and view with [Enter]]\r\n")
     bbs_write_string("|08------------------------------------------------------------------------------|07\r\n")
-    bbs_write_string("|02[|101|02] Servers|07\r\n")
-    bbs_write_string("|02[|102|02] Categories|07\r\n")
-    bbs_write_string("|02[|103|02] Games|07\r\n")
-    bbs_write_string("|08[|07Q|08] Exit|07\r\n")
-    bbs_write_string("\r\n|06Cmd? ")
-    local choice = bbs_getchar()
-    return choice
+
+    menuFooter()
+
+    while true do
+        if reloadMenu then
+            -- Reload the menu if the user has added or deleted an item
+            reloadMenu = false
+
+            conn = connectToDatabase()
+            if not conn then
+                bbs_write_string("Failed to connect to the database.\r\n")
+                return
+            end
+            cursor, err = conn:execute(query)
+            if not cursor then
+                bbs_write_string("Failed to fetch " .. itemName .. ": " .. err .. "\r\n")
+                conn:close()
+                return
+            end
+            itemList = {}
+            itemMapping = {} -- Reset the item mapping
+            originalIndex = 1
+            row = cursor:fetch({}, "a")
+            while row do
+                local itemText = string.sub(row[itemName], 1, 45)
+                local itemID = row[columnName]
+                table.insert(itemList, { ID = itemID, Text = itemText })
+                itemMapping[originalIndex] = itemID
+                row = cursor:fetch(row, "a")
+                originalIndex = originalIndex + 1
+            end
+            cursor:close()
+            conn:close()
+            numItems = #itemList
+
+            bbs_clear_screen()
+            menuHeader(header)
+            bbs_write_string(string.format("... |08Total items: %d|07\r\n", numItems))
+            bbs_write_string("... Use Arrow Keys and view with [Enter]:\r\n")
+            bbs_write_string("|08------------------------------------------------------------------------------|07\r\n")
+
+            menuFooter()
+        end
+
+        local startIndex = (offset * maxRows) + 1
+        local endIndex = math.min(startIndex + maxRows - 1, numItems)
+
+        -- Clear the entire list area
+        for i = scrollStartRow, scrollStartRow + maxRows - 1 do
+            positionCursor(i, 1)
+            bbs_write_string(string.rep(" ", bbs_get_term_width()))
+        end
+
+        -- Print items for the current view and highlight the selected row
+        for i = startIndex, endIndex do
+            local rowIndex = i - startIndex + scrollStartRow
+            local item = itemList[i]
+            positionCursor(rowIndex, 1)
+            
+            if i == selectedIndex then
+                -- Highlight the selected row
+                bbs_write_string("|21|11")
+            else
+                bbs_write_string("|16|03")
+            end
+            bbs_write_string(string.format(" %-45s |16|07\r\n", item.Text))
+        end
+
+        -- Handle user input for scrolling and adding items
+        local c = bbs_getchar()
+
+        if c == 'a' or c == 'A' then
+            selectedIndex = selectedIndex - 1
+            if selectedIndex < 1 then
+                selectedIndex = 1
+            end
+            if selectedIndex < startIndex then
+                offset = math.max(0, offset - 1)
+            end
+        elseif c == 'b' or c == 'B' then
+            selectedIndex = selectedIndex + 1
+            if selectedIndex > numItems then
+                selectedIndex = numItems
+            end
+            if selectedIndex > endIndex then
+                offset = math.min(math.floor((selectedIndex - 1) / maxRows), numItems - maxRows)
+            end
+        elseif c == '\13' then
+            -- Enter key
+            local selectedItemID = itemMapping[selectedIndex]
+            viewFunction(selectedItemID, tableName, columnName, editFunction, deleteFunction)
+            reloadMenu = true -- Set this flag to reload the menu after editing
+        elseif c == 'i' or c == 'I' then
+            addItemFunction()
+            reloadMenu = true -- Set this flag to reload the menu after adding
+        elseif c:lower() == 'q' then
+            break
+        end
+        -- Clear the last line of the list to prevent duplication
+        positionCursor(scrollStartRow + maxRows - 1, 1)
+        bbs_write_string(string.rep(" ", bbs_get_term_width()))
+    end
+end
+
+function listCategories()
+    local query = "SELECT CategoryID, Name, IsAdult FROM Categories ORDER BY Name;"
+    local header = "Categories"
+    local columnName = "CategoryID"
+    local itemName = "Name"
+    local tableName = "Categories"
+    local addItemFunction = addCategory -- Add your addCategory function here
+    local editFunction = addCategory
+    local deleteFunction = deleteCategory
+    local listType = "Categories" 
+    listItems(query, header, itemName, tableName, columnName, addItemFunction, editFunction, deleteFunction, listType)
+end
+
+function listGameInfo()
+    local query = "SELECT GameID, Title, IsAdult FROM GameInfo ORDER BY Title;"
+    local header = "GameInfo"
+    local columnName = "GameID"
+    local itemName = "Title"
+    local tableName = "GameInfo"
+    local addItemFunction = addGameInfo 
+    local editFunction = editGameInfo
+    local deleteFunction = deleteGameInfo
+    local listType = "Game Info"
+    listItems(query, header, itemName, tableName, columnName, addItemFunction, editFunction, deleteFunction, listType)
+end
+
+function listServers()
+    local query = "SELECT ServerID, Name, IP, Port, Type, Tag, IsActive FROM Servers ORDER BY Name;"
+    local header = "Servers"
+    local columnName = "ServerID"
+    local itemName = "Name"
+    local tableName = "Servers"
+    local addItemFunction = addServer
+    local editFunction = editServer
+    local deleteFunction = deleteServer
+    local listType = "Servers" 
+    listItems(query, header, itemName, tableName, columnName, addItemFunction, editFunction, deleteFunction, listType)
+end
+
+function viewFunction(selectedItemID, tableName, columnName, editFunction, deleteFunction)
+    if not selectedItemID then
+        bbs_write_string("selectedItemID is nil.\r\n")
+        return
+    end
+
+    local conn = connectToDatabase()
+    if not conn then
+        bbs_write_string("Failed to connect to the database.\r\n")
+        return
+    end
+
+    -- Query the database to retrieve item details
+    local query = string.format("SELECT * FROM %s WHERE %s = %s;", tableName, columnName, tonumber(selectedItemID))
+
+    local cursor, err = conn:execute(query) -- Convert selectedID to a number
+
+    if not cursor then
+        bbs_write_string("Failed to fetch item details: " .. err .. "\r\n")
+        conn:close()
+        return
+    end
+
+    local itemDetails = cursor:fetch({}, "a")
+    cursor:close()
+    conn:close()
+
+    -- Check if item exists
+    if not itemDetails then
+        bbs_write_string("Item not found.\r\n")
+        return
+    end
+
+    -- Display item details
+    bbs_clear_screen()
+    bbs_write_string("Item Details:\r\n")
+    for key, value in pairs(itemDetails) do
+        bbs_write_string(string.format("%s: %s\r\n", key, value))
+    end
+    bbs_write_string("\r\n")
+
+    -- Menu for Edit and Delete options
+    bbs_write_string("Options:\r\n")
+    bbs_write_string("1. Edit\r\n")
+    bbs_write_string("2. Delete\r\n")
+    bbs_write_string("Q. Quit\r\n")
+
+    while true do
+        local choice = bbs_getchar():lower()
+        if choice == '1' then
+            editFunction(selectedItemID)
+            break
+        elseif choice == '2' then
+            deleteFunction(selectedItemID)
+            break
+        elseif choice == 'q' then
+            break
+        end
+    end
 end
 
 ----------------------------------------------------------------
 -- Server Management
 ----------------------------------------------------------------
 
-function manageServers()
-
-    while true do
-        bbs_clear_screen()
-        listServers()
-      
-        bbs_write_string("\r\n|02[|101|02] Edit|07\r\n")
-        bbs_write_string("|02[|102|02] Add|07\r\n")
-        bbs_write_string("|02[|103|02] Delete|07\r\n")
-        bbs_write_string("|08[|07Q|08] Back|07\r\n")
-        bbs_write_string("\r\n|06Cmd? ")
-        local choice = bbs_getchar()
-
-        if choice == '1' then
-            editServer()  
-        elseif choice == '2' then
-            addServer()  
-        elseif choice == '3' then
-            deleteServer()  
-        elseif choice:lower() == 'q' then
-            break
-        else
-            bbs_write_string("Invalid choice, please try again.\r\n")
-            bbs_pause()
-        end
-    end
-end
-
-function listServers()
-    local conn = connectToDatabase()
-    local cursor = conn:execute("SELECT ServerID, Name, IP, Port, Type, Tag, IsActive FROM Servers")
-    bbs_clear_screen()
-    bbs_write_string("|03Door Manager v1.0|07\r\n")
-    bbs_write_string("|11Servers |07> |15List|07\r\n")
-    bbs_write_string("|08------------------------------------------------------------------------------|07\r\n")
-    bbs_write_string("ID  Name         Type     Address          Port   Tag   Active\r\n")
-    bbs_write_string("--------------------------------------------------------------\r\n")
-    local row = cursor:fetch({}, "a")
-    while row do
-        local ip = row.IP or "--"
-        local port = row.Port or "--"
-        local tag = row.Tag or "--"
-        local isActive = row.IsActive == 1 and "YES" or "NO"
-        bbs_write_string(string.format("%-3d %-12s %-8s %-16s %-6s %-5s %-3s\r\n", 
-                                      row.ServerID, row.Name:sub(1, 12), row.Type, ip:sub(1, 16), port, tag, isActive))
-        row = cursor:fetch(row, "a")
-    end
-    cursor:close()
-    conn:close()
-
-end
-
 function addServer()
     bbs_clear_screen()
-    bbs_write_string("|03Door Manager v1.0|07\r\n")
+    bbs_write_string("|03" .. title .. " v" .. version .. "|07\r\n")
     bbs_write_string("|11Servers |07> |15Add|07\r\n")
     bbs_write_string("|08------------------------------------------------------------------------------|07\r\n")
     
@@ -241,6 +454,7 @@ function addServer()
 
     conn:close()  -- Close the connection here to ensure it's closed whether the query succeeds or fails
     bbs_pause()
+    bbs_clear_screen()
 end
 
 function deleteServer()
@@ -333,10 +547,7 @@ function getServerInfo(serverID)
     return serverInfo
 end
 
-
 function editServer()
-    bbs_clear_screen()
-
     while true do
         -- First, list all servers for the user to choose from
         listServers()
@@ -461,7 +672,7 @@ function editServer()
                         break
                     else
                         -- Invalid choice
-                        bbs_write_string("\r\n|12Invalid choice. Please select a valid option.|07\r\n")
+                        bbs_write_string("|12Invalid choice|07\r\n\r\n")
                         bbs_pause()
                     end
                 end
@@ -470,7 +681,6 @@ function editServer()
         end
     end
 end
-
 
 function updateServerField(serverID, field, value, successMessage)
     local conn = connectToDatabase()
@@ -495,34 +705,6 @@ end
 ----------------------------------------------------------------
 -- Category Management
 ----------------------------------------------------------------
-
-function manageCategories()
-    while true do
-        bbs_clear_screen()
-        bbs_write_string("|11Category Management|07\r\n")
-        bbs_write_string("|08------------------------------------------------------------------------------|07\r\n")
-        listCategories()
-        bbs_write_string("\r\n|02[|101|02] Edit|07\r\n")
-        bbs_write_string("|02[|102|02] Add|07\r\n")
-        bbs_write_string("|02[|103|02] Delete|07\r\n")
-        bbs_write_string("|08[|07Q|08] Back|07\r\n")
-        bbs_write_string("\r\n|06Cmd? ")
-        local choice = bbs_getchar()
-
-        if choice == '1' then
-            editCategory()
-        elseif choice == '2' then
-            addCategory()  
-        elseif choice == '3' then
-            deleteCategory()  
-        elseif choice:lower() == 'q' then
-            break
-        else
-            bbs_write_string("Invalid choice, please try again.\r\n")
-            bbs_pause()
-        end
-    end
-end
 
 function addCategory()
     bbs_clear_screen()
@@ -623,74 +805,6 @@ function deleteCategory()
     bbs_pause()
 end
 
--- ANSI Escape Code Function for Cursor Positioning
-function positionCursor(row, col)
-    bbs_write_string(string.format("\x1b[%d;%df", row, col))
-end
-
-function listCategories()
-    local conn = connectToDatabase()
-    if not conn then
-        bbs_write_string("Failed to connect to the database.\r\n")
-        return
-    end
-
-    -- Query to fetch all categories
-    local sql = "SELECT CategoryID, Name, IsAdult FROM Categories ORDER BY Name;"
-    local cursor, err = conn:execute(sql)
-
-    if not cursor then
-        bbs_write_string("Failed to fetch categories: " .. err .. "\r\n")
-        conn:close()
-        return
-    end
-
-    bbs_clear_screen()
-    bbs_write_string("|03Door Manager v1.0|07\r\n")
-    bbs_write_string("|11Categories |07> |15List|07\r\n")
-    bbs_write_string("|08------------------------------------------------------------------------------|07\r\n")
-    
-    local categories = {}
-    local maxRowsPerColumn = 13  -- Set the maximum rows per column
-
-    local row = cursor:fetch({}, "a")
-    while row do
-        local isAdultText = row.IsAdult == 1 and "Yes" or "No"
-        local name = string.sub(row.Name, 1, 15) -- Limit name to 15 characters
-        table.insert(categories, string.format("%-3d %-26s %-5s\r\n", row.CategoryID, name, isAdultText))
-        row = cursor:fetch(row, "a")
-    end
-
-    cursor:close()
-    conn:close()
-
-    local numCategories = #categories
-    local numColumns = 2
-    local numRows = math.ceil(numCategories / numColumns)
-    
-    -- Print headers
-    positionCursor(4, 1)
-    bbs_write_string("ID  Name                       Adult    ID  Name                        Adult\r\n")
-    bbs_write_string("------------------------------------    -------------------------------------\r\n")
-
-    -- Print categories in two columns with a maximum number of rows per column
-    local rowOffset = 5
-    local colSpacing = 42
-
-    for i = 1, numRows do
-        for j = 1, numColumns do
-            local index = (i - 1) * numColumns + j
-            if index <= numCategories then
-                positionCursor(i + rowOffset, (j - 1) * colSpacing + 1)
-                bbs_write_string(categories[index])
-            end
-        end
-        if i == maxRowsPerColumn then
-            break  -- Stop printing after reaching the maximum rows per column
-        end
-    end
-end
-
 function editCategory()
     bbs_clear_screen()
     bbs_write_string("Edit Category\r\n")
@@ -783,78 +897,31 @@ function updateCategoryField(categoryId, field, value)
 end
 
 ----------------------------------------------------------------
--- Games Management
+-- Games Database (metadata about the game)
 ----------------------------------------------------------------
-
-function manageGames()
-    while true do
-        bbs_clear_screen()
-        bbs_write_string("|11Game Management|07\r\n")
-        bbs_write_string("|08------------------------------------------------------------------------------|07\r\n")
-        bbs_write_string("1. Manage Game Info\r\n")
-        bbs_write_string("2. Manage Game Instances\r\n")
-        bbs_write_string("\r\n[Q] Return to Main Menu\r\n")
-        bbs_write_string("\r\nEnter choice: ")
-        local choice = bbs_getchar()
-
-        if choice == '1' then
-            manageGameInfo()
-        elseif choice == '2' then
-            manageGameInstances()
-        elseif choice:lower() == 'q' then
-            break
-        else
-            bbs_write_string("Invalid choice, please try again.\r\n")
-            bbs_pause()
-        end
-    end
-end
-
-----------------------------------------------------------------
--- Games Info (metadata about the game)
-----------------------------------------------------------------
-
-function manageGameInfo()
-    while true do
-        bbs_clear_screen()
-        bbs_write_string("|11Game Info Management|07\r\n")
-        bbs_write_string("|08------------------------------------------------------------------------------|07\r\n")
-        bbs_write_string("1. List Game Info\r\n")
-        bbs_write_string("2. Add New Game Info\r\n")
-        bbs_write_string("\r\n[Q] Return to Previous Menu\r\n")
-        bbs_write_string("\r\nEnter choice: ")
-        local choice = bbs_getchar()
-
-        if choice == '1' then
-            listGameInfo()
-        elseif choice == '2' then
-            addGameInfo()
-        elseif choice:lower() == 'q' then
-            break
-        else
-            bbs_write_string("Invalid choice, please try again.\r\n")
-            bbs_pause()
-        end
-    end
-end
 
 function addGameInfo()
     bbs_clear_screen()
     bbs_write_string("Add New Game Info\r\n")
 
-    -- Collecting game information from the user
+    -- Game Title
     bbs_write_string("Enter Game Title: ")
     local title = bbs_read_string(50)
 
+    -- Game Description
     bbs_write_string("\r\nEnter Game Description: ")
     local description = bbs_read_string(100)
 
+    -- Ask for adult game info flag
     bbs_write_string("\r\nIs this game for adults only? [Y]es / [N]o: ")
-    local isAdult = (bbs_getchar():upper() == 'Y') and 1 or 0
+    local isAdultKey = bbs_getchar():upper()
+    local isAdult = (isAdultKey == 'Y') and 1 or 0
 
+    -- Year Published
     bbs_write_string("\r\nEnter Year Published: ")
     local yearPublished = tonumber(bbs_read_string(4))
 
+    -- Author Name
     bbs_write_string("\r\nEnter Author Name: ")
     local authorName = bbs_read_string(50)
 
@@ -876,48 +943,208 @@ function addGameInfo()
         bbs_write_string("\r\nGame info added successfully.\r\n")
     end
 
-    conn:close()
+    conn:close()  -- Close the connection here to ensure it's closed whether the query succeeds or fails
     bbs_pause()
 end
 
-function listGameInfo()
+function deleteGameInfo()
     local conn = connectToDatabase()
     if not conn then
-        bbs_write_string("Failed to connect to the database.\r\n")
+        bbs_write_string("\r\nFailed to connect to the database.\r\n")
+        bbs_pause()
         return
     end
 
-    local sql = "SELECT GameID, Title, YearPublished, AuthorName FROM GameInfo ORDER BY Title;"
-    local cursor, err = conn:execute(sql)
+    -- List all game info for the user to choose from
+    listGameInfo()
+
+    -- Ask the user to enter the ID of the game info to delete
+    bbs_write_string("\r\nEnter the ID of the game info to delete: ")
+    local gameIDToDelete = tonumber(bbs_read_string(10)) 
+
+    -- Convert gameIDToDelete to a number and validate
+    if not gameIDToDelete then
+        bbs_write_string("\r\n|12Invalid game info ID.|07\r\n")
+        bbs_pause()
+        return
+    end
+
+    -- Check if the game info is used in any Game Instances before deleting
+    local sqlCheck = string.format("SELECT COUNT(*) AS GameInstanceCount FROM GameInstances WHERE GameID = %d", gameIDToDelete)
+    local cursor, err = conn:execute(sqlCheck)
 
     if not cursor then
-        bbs_write_string("Failed to fetch game info: " .. err .. "\r\n")
+        bbs_write_string("\r\n|12Failed to query game instances: " .. err .. "|07\r\n")
         conn:close()
+        bbs_pause()
         return
     end
 
-    bbs_clear_screen()
-    bbs_write_string("List of Game Info:\r\n")
-    bbs_write_string("ID  Title               Year  Author       \r\n")
-    bbs_write_string("------------------------------------------------------------\r\n")
-
     local row = cursor:fetch({}, "a")
-    while row do
-        -- Truncate fields to fit the display
-        local title = row.Title:sub(1, 20)  -- Truncate title to 20 characters
-        local author = row.AuthorName:sub(1, 15)  -- Truncate author name to 15 characters
-
-        -- Format the output string
-        local output = string.format("%-4d%-20s%-6d%-15s", row.GameID, title, row.YearPublished, author)
-        bbs_write_string(output .. "\r\n")
-        row = cursor:fetch(row, "a")
+    if tonumber(row.GameInstanceCount) > 0 then
+        bbs_write_string("\r\n|12Cannot delete game info, as it is associated with game instances.|07\r\n")
+        cursor:close()
+        conn:close()
+        bbs_pause()
+        return
     end
 
     cursor:close()
+
+    -- Confirm deletion
+    bbs_write_string("\r\n|14Are you sure you want to delete game info ID " .. gameIDToDelete .. "? (yes/no): |07")
+    local confirmation = bbs_read_string(3)
+
+    if confirmation:lower() == "yes" then
+        -- Perform deletion
+        local sql = string.format("DELETE FROM GameInfo WHERE GameID = %d", gameIDToDelete)
+        local res, err = conn:execute(sql)
+        if not res then
+            bbs_write_string("\r\n|12Failed to delete game info: " .. err .. "|07\r\n")
+        else
+            bbs_write_string("\r\n|10Game info deleted successfully.|07\r\n")
+        end
+    else
+        bbs_write_string("\r\n|14Game info deletion cancelled.|07\r\n")
+    end
+
     conn:close()
     bbs_pause()
 end
 
+function editGameInfo()
+    -- Ask the user to enter the ID of the game info to edit
+    bbs_write_string("\r\nEnter Game ID: ")
+    local input = bbs_read_string(10)
+
+    if input:lower() == 'q' then
+        return
+    end
+
+    local gameID = tonumber(input)
+
+    if not gameID then
+        bbs_write_string("\r\n|12Invalid game ID.|07\r\n")
+        bbs_pause()
+        return
+    end
+
+    local conn = connectToDatabase()
+    if not conn then
+        bbs_write_string("\r\n|12Failed to connect to the database.|07\r\n")
+        bbs_pause()
+        return
+    end
+
+    local sqlCheck = string.format("SELECT COUNT(*) AS GameCount FROM GameInfo WHERE GameID = %d", gameID)
+    local cursor, err = conn:execute(sqlCheck)
+
+    if not cursor then
+        bbs_write_string("\r\n|12Failed to query game info: " .. err .. "|07\r\n")
+        conn:close()
+        bbs_pause()
+        return
+    end
+
+    local row = cursor:fetch({}, "a")
+    if not row or tonumber(row.GameCount) == 0 then
+        bbs_write_string("\r\n|12No game info found with the specified ID.|07\r\n")
+        cursor:close()
+        conn:close()
+        bbs_pause()
+        return
+    end
+
+    cursor:close()
+
+    -- Ask the user which field to edit
+    bbs_write_string("\r\nSelect field to edit:\r\n")
+    bbs_write_string("[1] Title\r\n")
+    bbs_write_string("[2] Description\r\n")
+    bbs_write_string("[3] Is Adult\r\n")
+    bbs_write_string("[4] Year Published\r\n")
+    bbs_write_string("[5] Author Name\r\n")
+    bbs_write_string("[6] Cancel\r\n")
+    bbs_write_string("\r\nEnter choice: ")
+
+    local choice = bbs_getchar()
+
+    if choice == '1' then
+        -- Edit Title
+        bbs_write_string("\r\nEnter new Title: ")
+        local newTitle = bbs_read_string(50)
+        updateGameInfoField(gameID, "Title", newTitle)
+    elseif choice == '2' then
+        -- Edit Description
+        bbs_write_string("\r\nEnter new Description: ")
+        local newDescription = bbs_read_string(100)
+        updateGameInfoField(gameID, "Description", newDescription)
+    elseif choice == '3' then
+        -- Edit IsAdult
+        bbs_write_string("\r\nSet as adult game info? [Y]es / [N]o: ")
+        local isAdult = (bbs_getchar():upper() == 'Y') and 1 or 0
+        updateGameInfoField(gameID, "IsAdult", isAdult)
+    elseif choice == '4' then
+        -- Edit Year Published
+        bbs_write_string("\r\nEnter new Year Published: ")
+        local newYearPublished = bbs_read_string(4)
+        updateGameInfoField(gameID, "YearPublished", newYearPublished)
+    elseif choice == '5' then
+        -- Edit Author Name
+        bbs_write_string("\r\nEnter new Author Name: ")
+        local newAuthorName = bbs_read_string(50)
+        updateGameInfoField(gameID, "AuthorName", newAuthorName)
+    else
+        -- Cancel
+        bbs_write_string("\r\nEdit canceled.\r\n")
+    end
+
+    bbs_pause()
+end
+
+function updateGameInfoField(gameID, field, value)
+    local conn = connectToDatabase()
+    local sql
+
+    if field == "IsAdult" then
+        sql = string.format("UPDATE GameInfo SET %s = %d WHERE GameID = %d", field, value, gameID)
+    else
+        sql = string.format("UPDATE GameInfo SET %s = '%s' WHERE GameID = %d", field, value, gameID)
+    end
+
+    local res, err = conn:execute(sql)
+
+    if res then
+        bbs_write_string("\r\n|10Game info updated successfully.|07\r\n")
+    else
+        bbs_write_string("\r\n|12Failed to update game info: " .. err .. "|07\r\n")
+    end
+
+    conn:close() -- Close the connection after the update
+end
+
+function displayGameOptions(gameID)
+    -- Display options to edit or delete the selected game
+    bbs_clear_screen()
+    bbs_write_string("Selected Game Options\r\n")
+    bbs_write_string("[1] Edit Game\r\n")
+    bbs_write_string("[2] Delete Game\r\n")
+    bbs_write_string("[3] Back\r\n")
+    bbs_write_string("\r\nEnter choice: ")
+
+    local choice = bbs_getchar()
+
+    if choice == '1' then
+        editGameInfo(gameID)
+    elseif choice == '2' then
+        deleteGameInfo(gameID)
+    elseif choice == '3' then
+        selectedGameID = nil
+    else
+        bbs_write_string("|12Invalid choice|07\r\n\r\n")
+        bbs_pause()
+    end
+end
 
 ----------------------------------------------------------------
 -- Games Instances (servers, categories, game code)
@@ -1045,27 +1272,208 @@ function initializeDatabase()
         bbs_write_string("Failed to create Games Instance table: " .. err .. "\r\n")
     end
 
+    -- Check if the GameInfo table is empty
+    local sqlCheckGameInfo = "SELECT COUNT(*) AS GameInfoCount FROM GameInfo;"
+    local cursor, err = conn:execute(sqlCheckGameInfo)
+    if not cursor then
+        bbs_write_string("Failed to check GameInfo table: " .. err .. "\r\n")
+    end
+
+    local row = cursor:fetch({}, "a")
+    local gameInfoCount = tonumber(row.GameInfoCount)
+    cursor:close()
+
+    if seedData and gameInfoCount == 0 then
+        seedGameInfoTableFromCSVFile("gm_db_seed_titles.csv", "|")
+        seedCategoriesTableFromCSVFile("gm_db_seed_categories.csv", "|")
+        seedServersTableFromCSVFile("gm_db_seed_servers.csv", "|")
+        
+    elseif seedData then
+        bbs_write_string("Database seeding skipped because the GameInfo table is not empty.\r\n")
+    else
+        bbs_write_string("Proceeding without database seeding.\r\n")
+    end
+
     conn:close()
+end
+
+function seedServersTableFromCSVFile(csvFileName, delimiter)
+    local conn = connectToDatabase()
+    if not conn then
+        bbs_write_string("Failed to connect to the database for seeding.\r\n")
+        return
+    end
+
+    -- Open the CSV file for reading
+    local file = io.open(bbs_get_data_path() .. "/" .. csvFileName, "r")
+    if not file then
+        bbs_write_string("Failed to open CSV file '" .. bbs_get_data_path() .. "/".. csvFileName .. "' for reading.\r\n")
+        conn:close()
+        return
+    end
+
+    -- Read and parse each line of the CSV file
+    for line in file:lines() do
+        local rowData = {}
+        for value in string.gmatch(line, '[^'..delimiter..']+') do
+            table.insert(rowData, value)
+        end
+
+        if #rowData == 6 then
+            local name = rowData[1]
+            local ip = rowData[2]
+            local port = rowData[3]
+            local type = rowData[4]
+            local tag = rowData[5]
+            local isActive = tonumber(rowData[6]) or 0
+
+            local sql = string.format("INSERT INTO Servers (Name, IP, Port, Type, Tag, IsActive) VALUES ('%s', '%s', '%s', '%s', '%s', %d)",
+                name, ip, port, type, tag, isActive)
+
+            local res, err = conn:execute(sql)
+            if not res then
+                bbs_write_string("Failed to insert data for server '" .. name .. "': " .. err .. "\r\n")
+            else
+                bbs_write_string("Data for server '" .. name .. "' inserted successfully.\r\n")
+            end
+        else
+            bbs_write_string("Skipping invalid CSV line: " .. line .. "\r\n")
+        end
+    end
+
+    file:close()
+    conn:close()
+end
+
+function seedCategoriesTableFromCSVFile(csvFileName, delimiter)
+    local conn = connectToDatabase()
+    if not conn then
+        bbs_write_string("Failed to connect to the database for seeding.\r\n")
+        return
+    end
+
+    -- Open the CSV file for reading
+    local file = io.open(bbs_get_data_path() .. "/" .. csvFileName, "r")
+    if not file then
+        bbs_write_string("Failed to open CSV file '" .. bbs_get_data_path() .. "/".. csvFileName .. "' for reading.\r\n")
+        conn:close()
+        return
+    end
+
+    -- Read and parse each line of the CSV file
+    for line in file:lines() do
+        local rowData = {}
+        for value in string.gmatch(line, '[^'..delimiter..']+') do
+            table.insert(rowData, value)
+        end
+
+        if #rowData == 2 then
+            local name = rowData[1]
+            local isAdult = rowData[2] == "Y" and 1 or 0
+
+            local sql = string.format("INSERT INTO Categories (Name, IsAdult) VALUES ('%s', %d)",
+                name, isAdult)
+
+            local res, err = conn:execute(sql)
+            if not res then
+                bbs_write_string("Failed to insert data for category '" .. name .. "': " .. err .. "\r\n")
+            else
+                bbs_write_string("Data for category '" .. name .. "' inserted successfully.\r\n")
+            end
+        else
+            bbs_write_string("Skipping invalid CSV line: " .. line .. "\r\n")
+        end
+    end
+
+    file:close()
+    conn:close()
+end
+
+-- seed GameInfo table from CSV file
+function seedGameInfoTableFromCSVFile(csvFileName, delimiter)
+    local conn = connectToDatabase()
+    if not conn then
+        bbs_write_string("Failed to connect to the database for seeding.\r\n")
+        return
+    end
+
+    -- Open the CSV file for reading
+    local file = io.open(bbs_get_data_path() .. "/" .. csvFileName, "r")
+    if not file then
+        bbs_write_string("Failed to open CSV file '" .. bbs_get_data_path() .. "/".. csvFileName .. "' for reading.\r\n")
+        conn:close()
+        return
+    end
+
+    -- Read and parse each line of the CSV file
+    for line in file:lines() do
+        local rowData = {}
+        for value in string.gmatch(line, '[^'..delimiter..']+') do
+            table.insert(rowData, value)
+        end
+
+        if #rowData == 5 then
+            local title = rowData[1]
+            local description = rowData[2]
+            local yearPublished = tonumber(rowData[3])
+            local authorName = rowData[4]
+            local isAdult = rowData[5] == "Y" and 1 or 0
+
+            local sql = string.format("INSERT INTO GameInfo (Title, Description, YearPublished, AuthorName, IsAdult) VALUES ('%s', '%s', %d, '%s', %d)",
+                title, description, yearPublished, authorName, isAdult)
+
+            local res, err = conn:execute(sql)
+            if not res then
+                bbs_write_string("Failed to insert data for game '" .. title .. "': " .. err .. "\r\n")
+            else
+                bbs_write_string("Data for game '" .. title .. "' inserted successfully.\r\n")
+            end
+        else
+            bbs_write_string("Skipping invalid CSV line: " .. line .. "\r\n")
+        end
+    end
+
+    file:close()
+    conn:close()
+end
+
+----------------------------------------------------------------------
+-- Main menu
+----------------------------------------------------------------------
+
+function displayMainMenu()
+    menuHeader("Main Menu")
+    bbs_write_string("|02[|101|02] Servers|07\r\n")
+    bbs_write_string("|02[|102|02] Categories|07\r\n")
+    bbs_write_string("|02[|103|02] Games Database|07\r\n")  
+    bbs_write_string("|02[|104|02] Games Menus|07\r\n")  
+    bbs_write_string("|08[|07Q|08] Exit|07\r\n")
+    bbs_write_string("\r\n|06Cmd? ")
+    local choice = bbs_getchar()
+    return choice
 end
 
 ----------------------------------------------------------------------
 -- Main loop
 ----------------------------------------------------------------------
-
+bbs_write_string("\x1b[?25l") --hide the cursor
 initializeDatabase()
 while true do
     local choice = displayMainMenu()
 
     if choice == '1' then
-        manageServers()
+        listServers()
     elseif choice == '2' then
-        manageCategories() 
+        listCategories() 
     elseif choice == '3' then
-        manageGames()
+        listGameInfo()  -- This menu manages Game Titles
+    elseif choice == '4' then
+        manageGameInstances()  -- This menu manages Game Instances
     elseif choice:lower() == 'q' then
         break
     else
-        bbs_write_string("\r\nInvalid choice, please try again.\r\n")
+        bbs_write_string("|12Invalid choice|07\r\n\r\n")
         bbs_pause()
     end
 end
+bbs_write_string("\x1b[?25h") --show cursor
